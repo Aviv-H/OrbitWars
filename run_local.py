@@ -5,9 +5,9 @@ def main():
     # יצירת סביבת המשחק
     env = make("orbit_wars", configuration={"seed": 42}, debug=True)
 
-    # הרצת המשחק: הסוכן שלנו מול סוכן רנדומלי
-    print("Starting simulation...")
-    steps = env.run(["main.py", "random"])
+    # הרצת המשחק: הסוכן שלנו מול 3 סוכנים רנדומליים (סה"כ 4 שחקנים)
+    print("Starting simulation with 4 players...")
+    steps = env.run(["main.py", "random", "random", "random"])
 
     # הדפסת התוצאות של התור האחרון
     final_step = steps[-1]
