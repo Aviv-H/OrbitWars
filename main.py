@@ -17,6 +17,9 @@ ENEMY_BONUS = 2.0  # כפל ל-production של כוכב אויב (כיבושו �
 MIN_GARRISON = 10         # מינימום ספינות שכל כוכב שומר תמיד
 SURPLUS_RATIO = 0.7       # שולח עד 70% מהעודף (לא הכל, כדי לא להישאר חשוף)
 
+# --- קבועי 4 שחקנים ---
+WEAKEST_ENEMY_BONUS = 1.5  # בונוס נוסף לכוכבי האויב החלש ביותר
+
 def get_fleet_speed(ships, max_speed=6.0):
     """חישוב מהירות הצי לפי מספר הספינות"""
     if ships <= 0: return 0
@@ -313,6 +316,18 @@ def agent(obs):
                 if abs(diff) < 0.2:
                     incoming_allied_ships[t.id] += f.ships
                     break
+   # --- זיהוי האויב החלש ביותר (רלוונטי ל-4 שחקנים) ---
+    enemy_owners = set(p.owner for p in planets if p.owner not in (-1, player))
+    weakest_enemy = None
+    if len(enemy_owners) > 1:
+        def enemy_strength(owner):
+            owner_planets = [p for p in planets if p.owner == owner]
+            total_ships = sum(p.ships for p in owner_planets)
+            total_prod = sum(p.production for p in owner_planets)
+            fleet_ships = sum(f.ships for f in fleets if f.owner == owner)
+            return total_ships + fleet_ships + total_prod * 10  # production שווה הרבה לטווח ארוך
+
+        weakest_enemy = min(enemy_owners, key=enemy_strength)
 
     # --- התקפה (רק מכוכבים שלא נשלחו להגנה) ---
     for mine in my_planets:
@@ -333,8 +348,10 @@ def agent(obs):
             if available_ships[mine.id] >= ships_needed:
                 if not intersects_sun(mine.x, mine.y, fx, fy):
                     dist = math.hypot(fx - mine.x, fy - mine.y)
-                    # production_value: כפול אם כוכב אויב (כיבושו גם מחליש אותו)
+                    # production_value: כפול אם כוכב אויב, בונוס נוסף אם הוא האויב החלש ביותר
                     production_value = target.production * (ENEMY_BONUS if target.owner != -1 else 1.0)
+                    if weakest_enemy is not None and target.owner == weakest_enemy:
+                        production_value *= WEAKEST_ENEMY_BONUS
                     # ציון גבוה = מטרה עדיפה
                     score = (production_value / (ships_needed + 1)) / (1 + dist * DIST_WEIGHT)
                     valid_targets.append((target, fx, fy, score, ships_needed))
