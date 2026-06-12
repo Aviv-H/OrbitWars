@@ -20,6 +20,11 @@ SURPLUS_RATIO = 0.7       # שולח עד 70% מהעודף (לא הכל, כדי 
 # --- קבועי 4 שחקנים ---
 WEAKEST_ENEMY_BONUS = 1.5  # בונוס נוסף לכוכבי האויב החלש ביותר
 
+# --- קבועי תזמון תקיפה ---
+ATTACK_RATIO = 1.5         # לא תוקפים אויב שיש לו יותר מ-1.5x הספינות שלנו
+ANCHOR_GARRISON_RATIO = 3  # כוכב עוגן שומר פי 3 מהמינימום הרגיל
+
+
 def get_fleet_speed(ships, max_speed=6.0):
     """חישוב מהירות הצי לפי מספר הספינות"""
     if ships <= 0: return 0
@@ -44,20 +49,40 @@ def get_future_position(planet, t, angular_velocity):
 
 def get_interception_point(source, target, angular_velocity):
     """
-    מוצא את נקודת המפגש ואת כמות הספינות הנדרשת,
-    תוך שקלול קצב ייצור הספינות של המטרה לאורך זמן הטיסה.
+    מוצא נקודת יירוט מדויקת.
+    לכוכב נייח — בדיקה ישירה (מהיר).
+    לכוכב זז — מסמלץ את נתיב הצי כדי לוודא שהוא אכן פוגש את הכוכב.
     """
-    # מריצים סימולציה עד 200 תורות קדימה
+    orbital_radius = math.hypot(target.x - CENTER[0], target.y - CENTER[1])
+    is_moving = (orbital_radius + target.radius < 50.0) and (angular_velocity != 0)
+
     for t in range(1, 200):
         fx, fy = get_future_position(target, t, angular_velocity)
-        dist = math.hypot(fx - source.x, fy - source.y)
-        # כוכבים ניטרליים לא מייצרים ספינות, רק אויבים
         enemy_growth = target.production * t if target.owner != -1 else 0
         ships_needed = target.ships + enemy_growth + 1
-        # חישוב המהירות מבוסס על הכוח שנצטרך לשלוח
         speed = get_fleet_speed(ships_needed)
-        if dist <= speed * t:
-            return fx, fy, ships_needed
+
+        if not is_moving:
+            # כוכב נייח — בדיקה ישירה
+            dist = math.hypot(fx - source.x, fy - source.y)
+            if dist <= speed * t:
+                return fx, fy, ships_needed
+        else:
+            # כוכב זז — בדוק שהצי מספיק להגיע לנקודה החזויה
+            dist_to_intercept = math.hypot(fx - source.x, fy - source.y)
+            if dist_to_intercept > speed * t:
+                continue
+
+            # סמלץ את נתיב הצי ובדוק פגיעה בכל שלב
+            angle = math.atan2(fy - source.y, fx - source.x)
+            fleet_x, fleet_y = source.x, source.y
+            for step in range(1, t + 1):
+                fleet_x += math.cos(angle) * speed
+                fleet_y += math.sin(angle) * speed
+                px, py = get_future_position(target, step, angular_velocity)
+                if math.hypot(fleet_x - px, fleet_y - py) <= target.radius + speed:
+                    return px, py, ships_needed
+
     return None, None, None
 
 
@@ -328,7 +353,9 @@ def agent(obs):
             return total_ships + fleet_ships + total_prod * 10  # production שווה הרבה לטווח ארוך
 
         weakest_enemy = min(enemy_owners, key=enemy_strength)
-
+    # --- זיהוי כוכב עוגן — הכי יצרני שלנו ---
+    anchor = max(my_planets, key=lambda p: p.production) if my_planets else None
+    anchor_garrison = MIN_GARRISON * ANCHOR_GARRISON_RATIO
     # --- התקפה (רק מכוכבים שלא נשלחו להגנה) ---
     for mine in my_planets:
         if mine.id in used_as_defenders:
@@ -347,6 +374,10 @@ def agent(obs):
 
             if available_ships[mine.id] >= ships_needed:
                 if not intersects_sun(mine.x, mine.y, fx, fy):
+                    # תזמון תקיפה: דלג אם האויב חזק מדי ביחס לכוחנו הכולל
+                    my_total = sum(available_ships[p.id] for p in my_planets)
+                    if target.owner != -1 and target.ships > my_total * ATTACK_RATIO:
+                        continue
                     dist = math.hypot(fx - mine.x, fy - mine.y)
                     # production_value: כפול אם כוכב אויב, בונוס נוסף אם הוא האויב החלש ביותר
                     production_value = target.production * (ENEMY_BONUS if target.owner != -1 else 1.0)
@@ -365,12 +396,25 @@ def agent(obs):
             incoming_allied_ships[best_target.id] += ships_to_send
 
     # --- Surplus dispatching: כוכבים שלא מצאו מטרה — שולחים עודף לכוכב שלנו הכי חלש ---
-    if len(my_planets) > 1:
+    if len(my_planets) > 1 and targets:
+        # מצא כוכב קדמי — שלנו, עם מרחק מינימלי לכוכב האויב הקרוב ביותר
+        def forward_base_score(p):
+            return min(
+                math.hypot(p.x - t.x, p.y - t.y)
+                for t in targets
+            )
+        forward_base = min(my_planets, key=forward_base_score)
+
         for mine in my_planets:
             if mine.id in used_as_defenders:
                 continue
+            if mine.id == forward_base.id:
+                continue  # הכוכב הקדמי עצמו לא שולח לעצמו
 
-            surplus = available_ships[mine.id] - MIN_GARRISON
+            # כוכב עוגן — שומר רזרבה גדולה יותר
+            garrison = anchor_garrison if (anchor and mine.id == anchor.id) else MIN_GARRISON
+
+            surplus = available_ships[mine.id] - garrison
             if surplus <= 0:
                 continue
 
@@ -379,21 +423,17 @@ def agent(obs):
             if already_sent:
                 continue
 
-            # מצא את הכוכב שלנו עם הכי מעט ספינות (לא אותו כוכב)
-            weakest = min(
-                [p for p in my_planets if p.id != mine.id],
-                key=lambda p: available_ships[p.id]
-            )
-
-            # שלח רק אם הוא חלש ממני משמעותית
-            if available_ships[weakest.id] >= available_ships[mine.id] * 0.8:
-                continue
+            # שלח רק אם הכוכב הקדמי קרוב לאויב יותר ממני
+            my_dist_to_enemy = forward_base_score(mine)
+            fb_dist_to_enemy = forward_base_score(forward_base)
+            if fb_dist_to_enemy >= my_dist_to_enemy * 0.9:
+                continue  # אני כבר קדמי מספיק, אין טעם לשלוח
 
             to_send = int(surplus * SURPLUS_RATIO)
             if to_send <= 0:
                 continue
 
-            fx, fy, _ = get_interception_point(mine, weakest, angular_velocity)
+            fx, fy, _ = get_interception_point(mine, forward_base, angular_velocity)
             if fx is None:
                 continue
             if intersects_sun(mine.x, mine.y, fx, fy):
