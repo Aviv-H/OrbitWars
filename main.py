@@ -13,6 +13,10 @@ DEFENDER_RESERVE_RATIO = 0.4   # שומרים 40% מהספינות בכוכב ה
 DIST_WEIGHT = 0.02  # עונש על מרחק (קטן — לא רוצים שמרחק ידכא לגמרי)
 ENEMY_BONUS = 2.0  # כפל ל-production של כוכב אויב (כיבושו מחליש אותו)
 
+# --- קבועי Surplus dispatching ---
+MIN_GARRISON = 10         # מינימום ספינות שכל כוכב שומר תמיד
+SURPLUS_RATIO = 0.7       # שולח עד 70% מהעודף (לא הכל, כדי לא להישאר חשוף)
+
 def get_fleet_speed(ships, max_speed=6.0):
     """חישוב מהירות הצי לפי מספר הספינות"""
     if ships <= 0: return 0
@@ -70,44 +74,147 @@ def intersects_sun(x1, y1, x2, y2):
     dist_sq = (closest_x - CENTER[0]) ** 2 + (closest_y - CENTER[1]) ** 2
     return dist_sq <= SUN_RADIUS ** 2
 
-# זיהוי האיום
-def get_planet_threat(planet, fleets, player, angular_velocity):
+
+def simulate_future(planets, fleets, player, angular_velocity, turns=30):
     """
-    מחזיר מילון עם פרטי האיום על הכוכב, או None אם אין איום.
+    מסמלץ את המשחק turns תורות קדימה ללא ניבוי מהלכי שחקנים.
+    מחזיר: planet_states — מילון {planet_id: {"owner", "ships", "fell_at"}}
+    fell_at = התור שבו כוכב שלנו נפל לאויב (None אם לא נפל).
     """
-    if planet.owner != player:
-        return None
+    # העתק מצב כוכבים
+    p_ships   = {p.id: float(p.ships)   for p in planets}
+    p_owner   = {p.id: p.owner          for p in planets}
+    p_prod    = {p.id: p.production     for p in planets}
+    p_pos     = {p.id: (p.x, p.y)       for p in planets}
+    p_radius  = {p.id: p.radius         for p in planets}
+    fell_at   = {p.id: None             for p in planets}
 
-    enemy_fleets = [f for f in fleets if f.owner != player]
-    if not enemy_fleets:
-        return None
+    # העתק ציים: [x, y, angle, ships, owner, target_approx]
+    # נשמור רק ציים שיש להם יעד ברור — נזהה לפי קרבה לכוכב
+    active_fleets = []
+    for f in fleets:
+        # מצא את הכוכב הכי קרוב לכיוון הצי (בהנחת יעד)
+        best_planet = None
+        best_dot = -1
+        for p in planets:
+            if p.owner == f.owner:
+                continue
+            dx = p.x - f.x
+            dy = p.y - f.y
+            dist = math.hypot(dx, dy)
+            if dist == 0:
+                continue
+            dot = math.cos(f.angle) * (dx / dist) + math.sin(f.angle) * (dy / dist)
+            if dot > best_dot:
+                best_dot = dot
+                best_planet = p
+        if best_planet and best_dot > 0.95:
+            active_fleets.append({
+                "x": f.x, "y": f.y,
+                "ships": f.ships,
+                "owner": f.owner,
+                "target_id": best_planet.id,
+                "speed": get_fleet_speed(f.ships),
+            })
 
-    total_enemy_arriving = 0
-    earliest_eta = 999
+    for t in range(1, turns + 1):
+        # 1. הזז ציים והנח אם הגיעו
+        remaining_fleets = []
+        arrivals = {}  # planet_id -> [(owner, ships)]
 
-    for f in enemy_fleets:
-        dist = math.hypot(f.x - planet.x, f.y - planet.y)
-        speed = get_fleet_speed(f.ships)
-        eta = max(1, int(dist / speed))
-        total_enemy_arriving += f.ships
-        earliest_eta = min(earliest_eta, eta)
+        for fl in active_fleets:
+            tid = fl["target_id"]
+            tx, ty = p_pos[tid]
+            dist = math.hypot(fl["x"] - tx, fl["y"] - ty)
+            if dist <= fl["speed"]:
+                arrivals.setdefault(tid, []).append((fl["owner"], fl["ships"]))
+            else:
+                # הזז קדימה
+                angle_to = math.atan2(ty - fl["y"], tx - fl["x"])
+                fl["x"] += math.cos(angle_to) * fl["speed"]
+                fl["y"] += math.sin(angle_to) * fl["speed"]
+                remaining_fleets.append(fl)
 
-    if total_enemy_arriving == 0:
-        return None
+        active_fleets = remaining_fleets
 
-    # כמה ספינות יהיו לנו ברגע ההגעה הראשון
-    our_ships_at_eta = planet.ships + planet.production * earliest_eta
-    deficit = total_enemy_arriving - our_ships_at_eta + 1
-    will_fall = deficit > 0
+        # 2. עדכן כוכבים מציים שנחתו
+        for pid, arr_list in arrivals.items():
+            current_owner = p_owner[pid]
+            current_ships = p_ships[pid]
+
+            # קבץ לפי בעלים
+            by_owner = {}
+            for (owner, ships) in arr_list:
+                by_owner[owner] = by_owner.get(owner, 0) + ships
+
+            # הוסף ספינות ידידותיות לבעל הכוכב
+            friendly = by_owner.pop(current_owner, 0)
+            current_ships += friendly
+
+            # כל אויב תוקף לפי תור
+            for att_owner, att_ships in by_owner.items():
+                if att_ships > current_ships:
+                    # הכוכב נכבש
+                    if current_owner == player and fell_at[pid] is None:
+                        fell_at[pid] = t
+                    current_ships = att_ships - current_ships
+                    current_owner = att_owner
+                else:
+                    current_ships -= att_ships
+
+            p_ships[pid] = current_ships
+            p_owner[pid] = current_owner
+
+        # 3. ייצור ספינות
+        for pid in p_ships:
+            p_ships[pid] += p_prod[pid]
+
+        # 4. עדכן מיקומי כוכבים (סיבוב)
+        for p in planets:
+            nx, ny = get_future_position(p, t, angular_velocity)
+            p_pos[p.id] = (nx, ny)
 
     return {
-        "planet": planet,
-        "eta": earliest_eta,
-        "enemy_ships": total_enemy_arriving,
-        "our_ships_at_eta": our_ships_at_eta,
-        "deficit": deficit,
-        "will_fall": will_fall,
+        pid: {
+            "owner": p_owner[pid],
+            "ships": p_ships[pid],
+            "fell_at": fell_at[pid],
+        }
+        for pid in p_owner
     }
+
+
+def get_threats_from_simulation(sim_result, planets, player):
+    """
+    מחיר הסימולציה → רשימת איומים על כוכבים שלנו.
+    מחליף את get_planet_threat הישן.
+    """
+    planet_by_id = {p.id: p for p in planets}
+    threats = []
+
+    for pid, state in sim_result.items():
+        p = planet_by_id[pid]
+        if p.owner != player:
+            continue
+        if state["fell_at"] is None:
+            continue
+
+        # הכוכב עתיד ליפול בתור fell_at
+        eta = state["fell_at"]
+        our_ships_then = p.ships + p.production * eta
+        # deficit: כמה ספינות נוספות נצטרך (אומדן שמרני)
+        deficit = max(1, int(our_ships_then * 0.5) + 1)
+
+        threats.append({
+            "planet": p,
+            "eta": eta,
+            "enemy_ships": None,  # לא ידוע במדויק מהסימולציה
+            "our_ships_at_eta": our_ships_then,
+            "deficit": deficit,
+            "will_fall": True,
+        })
+
+    return threats
 
 #  שליחת תגבורת
 def defend_planets(my_planets, threats, available_ships, moves, angular_velocity):
@@ -189,11 +296,8 @@ def agent(obs):
     available_ships = {p.id: p.ships for p in my_planets}
 
     # --- הגנה (לפני ההתקפה) ---
-    threats = []
-    for mine in my_planets:
-        threat = get_planet_threat(mine, fleets, player, angular_velocity)
-        if threat:
-            threats.append(threat)
+    sim_result = simulate_future(planets, fleets, player, angular_velocity, turns=30)
+    threats = get_threats_from_simulation(sim_result, planets, player)
 
     used_as_defenders = defend_planets(
         my_planets, threats, available_ships, moves, angular_velocity
@@ -236,12 +340,49 @@ def agent(obs):
                     valid_targets.append((target, fx, fy, score, ships_needed))
 
         if valid_targets:
-            # תעדוף מטרה הקרובה ביותר לאחר תנועה
-            best_target, fx, fy, _, ships_to_send = min(valid_targets, key=lambda item: item[3])
+            best_target, fx, fy, _, ships_to_send = max(valid_targets, key=lambda item: item[3])
             angle = math.atan2(fy - mine.y, fx - mine.x)
             moves.append([mine.id, angle, ships_to_send])
             available_ships[mine.id] -= ships_to_send
             # רושמים מקומית את הצי החדש שיצרנו כדי שכוכבים אחרים שלנו באותו תור לא ישגרו אליו גם
             incoming_allied_ships[best_target.id] += ships_to_send
 
+    # --- Surplus dispatching: כוכבים שלא מצאו מטרה — שולחים עודף לכוכב שלנו הכי חלש ---
+    if len(my_planets) > 1:
+        for mine in my_planets:
+            if mine.id in used_as_defenders:
+                continue
+
+            surplus = available_ships[mine.id] - MIN_GARRISON
+            if surplus <= 0:
+                continue
+
+            # בדוק אם כבר שלח ספינות לתקיפה בתור הזה
+            already_sent = any(m[0] == mine.id for m in moves)
+            if already_sent:
+                continue
+
+            # מצא את הכוכב שלנו עם הכי מעט ספינות (לא אותו כוכב)
+            weakest = min(
+                [p for p in my_planets if p.id != mine.id],
+                key=lambda p: available_ships[p.id]
+            )
+
+            # שלח רק אם הוא חלש ממני משמעותית
+            if available_ships[weakest.id] >= available_ships[mine.id] * 0.8:
+                continue
+
+            to_send = int(surplus * SURPLUS_RATIO)
+            if to_send <= 0:
+                continue
+
+            fx, fy, _ = get_interception_point(mine, weakest, angular_velocity)
+            if fx is None:
+                continue
+            if intersects_sun(mine.x, mine.y, fx, fy):
+                continue
+
+            angle = math.atan2(fy - mine.y, fx - mine.x)
+            moves.append([mine.id, angle, to_send])
+            available_ships[mine.id] -= to_send
     return moves
