@@ -7,7 +7,7 @@ def main():
 
     # הרצת המשחק: הסוכן שלנו מול 3 סוכנים רנדומליים (סה"כ 4 שחקנים)
     print("Starting simulation with 4 players...")
-    players = ["main.py", "old1.py", "old2.py", "old3.py"]
+    players = ["main.py", "player1.py", "player2.py", "player4.py"]
     steps = env.run(players)
 
     # הדפסת התוצאות של התור האחרון
