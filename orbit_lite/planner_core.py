@@ -502,6 +502,9 @@ def _plan_regroup(
     src_pres = pressure[src_idx.clamp(0, P - 1)].view(S, 1)
     dst_pres = pressure[dst_idx.clamp(0, P - 1)].view(1, T)
     gap = dst_pres - src_pres                                                    # [S, T]
+    if config.regroup_pressure_norm == "l2":
+        norm = torch.sqrt(src_pres * src_pres + dst_pres * dst_pres).clamp(min=1.0)
+        gap = gap / norm
 
     # arrival-turn ownership check: dst must still be mine at k = ceil(eta).
     owner = garrison_status.owner                                               # [P, H+1]

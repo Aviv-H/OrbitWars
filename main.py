@@ -64,8 +64,9 @@ class ProducerLiteConfig:
     max_regroup_targets_per_source: int = 7
     regroup_pressure_norm: str = "none"
     regroup_time_penalty_weight: float = 1e-3
-
-
+    # --- התוספות שלנו ---
+    kingmaker_bonus: float = 1.52
+    weakest_enemy_bonus: float = 1.38
 CONFIG_4P = dataclasses.replace(
     ProducerLiteConfig(),
     horizon=14,
@@ -78,7 +79,6 @@ CONFIG_4P = dataclasses.replace(
     max_regroup_time=5.0,
     max_regroup_targets_per_source=12,
 )
-
 
 def _config_for_state(player_count: int, obs) -> ProducerLiteConfig:
     base = CONFIG_4P if int(player_count) >= 4 else ProducerLiteConfig()
@@ -100,17 +100,17 @@ def _config_for_state(player_count: int, obs) -> ProducerLiteConfig:
     many_neutrals = neutral_planets >= 6
     behind = my_share < 0.30 or owned_planets + 1 < enemy_planets
     ahead = my_share > 0.60 or owned_planets >= enemy_planets + 2
-
     if early_game:
-        base = dataclasses.replace(
+            base = dataclasses.replace(
             base,
-            roi_threshold=0.95,
-            max_waves_per_turn=14,
-            max_offensive_targets=12,
+            roi_threshold=0.85,          # תקיפת מטרות זולות יותר
+            max_waves_per_turn=17,       # ריבוי שילוחים
+            max_offensive_targets=14,
             max_defensive_targets=5,
-            min_ships_to_launch=1.8,
-            max_sources_per_lane=12,
+            min_ships_to_launch=1.0,     # אפס עתודות - שולחים הכל!
+            max_sources_per_lane=13,
             regroup_pressure_norm="none",
+            kingmaker_bonus=1.45,        # בונוס לתקיפה אסטרטגית מההתחלה
         )
     elif terminal_phase:
         base = dataclasses.replace(
@@ -120,7 +120,7 @@ def _config_for_state(player_count: int, obs) -> ProducerLiteConfig:
             max_offensive_targets=14,
             max_defensive_targets=3,
             min_ships_to_launch=1.0,
-            enable_regroup=False,
+            enable_regroup=my_share < 0.65, # תיקון קריטי: לאפשר תגבורות כל עוד לא ניצחנו
             max_sources_per_lane=12,
         )
     elif ahead:
@@ -368,7 +368,7 @@ def plan_lite_waves(
         player_count=int(player_count), launches=launches, player_id=pid,
     )
     score = torch.where(cand_valid, score, torch.full_like(score, float("-inf")))
-
+    score = score * (config.kingmaker_bonus ** 0.25)
     wave_entries, leftover = _greedy_select(
         P=P, W=W, device=device, dtype=dtype, score=score,
         cand_src=cand_src, cand_send=cand_send, cand_angle=cand_angle, cand_eta=cand_eta,
